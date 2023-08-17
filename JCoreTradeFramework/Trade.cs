@@ -22,6 +22,9 @@ using OpenQA.Selenium.Interactions;
 using OpenQA.Selenium;
 using System.Threading;
 using static SteamKit2.Internal.CMsgRemoteClientBroadcastStatus;
+using System.Net.Mime;
+using RestSharp;
+using System.IO.Compression;
 
 namespace JCoreTradeFramework
 {
@@ -68,92 +71,151 @@ namespace JCoreTradeFramework
             }
             return AccountInventory;
         }
+        private static DateTime? _inventoryTime;
+        private static long GetTimeStampForInventoryRequest()
+        {
+            if (_inventoryTime == null)
+                _inventoryTime = DateTime.UtcNow;
 
+            if (_inventoryTime < DateTime.UtcNow - TimeSpan.FromHours(1))
+                _inventoryTime = DateTime.UtcNow;
+
+            return _inventoryTime.Value.ToTimeStamp();
+        }
         public static async Task<bool> SendTrade(JCSteamAccountInstance Account, string TradeLink, List<CSGOItem> items)
         {
             if (Account.AccountInfo.MaFile == null) return false;
             await Account.AccountInfo.CheckSession();
-            ChromeDriverService service = ChromeDriverService.CreateDefaultService(AppDomain.CurrentDomain.BaseDirectory + @"\Dependents\chromedriver.exe");
-
-            service.HideCommandPromptWindow = true;
-            ChromeOptions options = new ChromeOptions();
-            options.AddArgument("--window-size=1920,1080");
-            options.AddArgument("--disable-gpu");
-            options.AddArgument("--disable-extensions");
-            options.AddArgument("--proxy-server='direct://'");
-            options.AddArgument("--proxy-bypass-list=*");
-            options.AddArgument("--start-maximized");
-            options.AddArgument("--headless");
-            options.AddArgument("no-sandbox");
-            IWebDriver driver = new ChromeDriver(service, options);
-            CookieContainer cookieContainer = Utils.GetCookies(Account.AccountInfo.MaFile.Session);
-            driver.Navigate().GoToUrl(TradeLink);
-            CookieCollection Cookies = cookieContainer.GetCookies(new Uri("https://steamcommunity.com/"));
-            foreach (System.Net.Cookie cookie in Cookies)
+            var tradeObjects = new List<object>();
+            foreach (var item in items)
             {
-                try
+                tradeObjects.Add(new
                 {
-                    if (cookie.Name != "mobileClient" && cookie.Name != "mobileClientVersion")
-                        driver.Manage().Cookies.AddCookie(new OpenQA.Selenium.Cookie(cookie.Name, cookie.Value));
-
-                }
-                catch (Exception ex)
-                {
-                    return false;
-                }
-
+                    appid = 730,
+                    contextid = 2,
+                    amount = 1,
+                    assetid = item.ID.ToString(),
+                });
             }
+            JsonConvert.SerializeObject(tradeObjects).ToString();
+            Uri uri = new Uri(TradeLink);
+            string partnerId = uri.QueryParameters("partner");
+            string token = uri.QueryParameters("token");
+            var data = new List<(string key, string value)>
+        {
+            ("sessionid", Account.AccountInfo.MaFile.Session.SessionID),
+            ("serverid", "1"),
+            ("partner", $"{76561197960265728 + Int64.Parse(partnerId)}"),
+            ("tradeoffermessage", "test"),
+            ("json_tradeoffer", "{\"newversion\":true,\"version\":2,\"me\":{\"assets\":" + JsonConvert.SerializeObject(tradeObjects) + ",\"currency\":[],\"ready\":false},\"them\":{\"assets\":[],\"currency\":[],\"ready\":false}}"),
+            ("captcha", ""),
+            ("trade_offer_create_params", $"{{\"trade_offer_access_token\":\"{token}\"}}")
+        };
+            var referer = $"https://steamcommunity.com/tradeoffer/new/?partner={partnerId}";
 
-            driver.Navigate().Refresh();
-
+            Console.WriteLine(GetTimeStampForInventoryRequest());
+            var cookies = CreateCookies(Account);
+            cookies.Add(new System.Net.Cookie("webTradeEligibility",
+                    $"%7B%22allowed%22%3A1%2C%22allowed_at_time%22%3A0%2C%22steamguard_required_days%22%3A15%2C%22new_device_cooldown_days%22%3A0%2C%22time_checked%22%3A{GetTimeStampForInventoryRequest()}%7D")
+            { Domain = "steamcommunity.com" });
+           
+            CancellationToken cancellationToken = default;
             try
             {
-                if (driver.FindElement(By.XPath("//*[@id=\"headline\"]")).Displayed)
-                {
-                    //Utils.ShowDialog("Steam dont work.");
-                }
+                RestResponse response = await ExecutePostRequestAsync(
+                 "https://steamcommunity.com/tradeoffer/new/send",
+                 cookies,
+                 null,
+                 referer,
+                  string.Join("&", data.Select(t => $"{WebUtility.UrlEncode(t.key)}={WebUtility.UrlEncode(t.value)}")),
+                 cancellationToken);
+                Console.WriteLine(response.StatusCode);
+                Console.WriteLine(response.Content);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-
+                throw;
             }
-            Thread.Sleep(2000);
-            try
-            {
-
-                IJavaScriptExecutor js = (IJavaScriptExecutor)driver;
-                js.ExecuteScript("arguments[0].click();", driver.FindElement(By.XPath("//*[@id=\"appselect_activeapp\"]")));
-                js.ExecuteScript("arguments[0].click();", driver.FindElement(By.XPath("//*[@id=\"appselect_option_you_730_2\"]")));
-                Thread.Sleep(500);
-                Console.WriteLine(items.Count);
-                Actions action = new Actions(driver);
-                foreach (var item in items)
-                {
-                    IJavaScriptExecutor jsExecutor = (IJavaScriptExecutor)driver;
-                    string script = $@"var element = document.evaluate('//*[@id=""item730_2_{item.ID.ToString()}""]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                          var event = new MouseEvent('dblclick', {{ bubbles: true, cancelable: true, view: window }});
-                          element.dispatchEvent(event);";
-                    jsExecutor.ExecuteScript(script);
-                    //Thread.Sleep(500);
-                }
-                Thread.Sleep(500);
-                js.ExecuteScript("arguments[0].click();", driver.FindElement(By.XPath("//*[@id=\"you_notready\"]")));
-                Thread.Sleep(500);
-                js.ExecuteScript("arguments[0].click();", driver.FindElement(By.XPath("/html/body/div[3]/div[3]/div/div[2]/div[1]/span")));
-                Thread.Sleep(500);
-                js.ExecuteScript("arguments[0].click();", driver.FindElement(By.XPath("//*[@id=\"trade_confirmbtn\"]")));
-                Thread.Sleep(2000);
-                driver.Quit();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
-                return false;
-                /*                Utils.ShowDialog(ex.Message);*/
-            }
-            Confirmation[] confirmations = await Account.AccountInfo.MaFile.FetchConfirmationsAsync();
-            await Account.AccountInfo.MaFile.AcceptConfirmation(confirmations.Last());
+            Thread.Sleep(200);
+              Confirmation[] confirmations = await Account.AccountInfo.MaFile.FetchConfirmationsAsync();
+              await Account.AccountInfo.MaFile.AcceptConfirmation(confirmations.Last());
             return true;
         }
+        public static CookieContainer CreateCookies(JCSteamAccountInstance accountInstance)
+        {
+            var container = new CookieContainer();
+
+            container.Add(new System.Net.Cookie("steamid", accountInstance.AccountInfo.MaFile.Session.SteamID.ToString(), "/", ".steamcommunity.com"));
+            container.Add(new System.Net.Cookie("sessionid", accountInstance.AccountInfo.MaFile.Session.SessionID, "/", ".steamcommunity.com"));
+
+            container.Add(new System.Net.Cookie("steamLoginSecure", accountInstance.AccountInfo.MaFile.Session.SteamID.ToString() + "%7C%7C" + accountInstance.AccountInfo.MaFile.Session.AccessToken, "/", ".steamcommunity.com")
+            {
+                HttpOnly = true,
+                Secure = true
+            });
+            container.Add(new System.Net.Cookie("bCompletedTradeOfferTutorial", "true", "/", ".steamcommunity.com"));
+            container.Add(new System.Net.Cookie("Steam_Language", "english", "/", ".steamcommunity.com"));
+            container.Add(new System.Net.Cookie("dob", "", "/", ".steamcommunity.com"));
+
+            return container;
+        }
+        private static void AddHeadersToRequest(RestRequest request, string referer = "https://steamcommunity.com")
+        {
+            request.AddHeader("Accept", "application/json, text/javascript;q=0.9, */*;q=0.5");
+            request.AddHeader("UserAgent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36");
+            request.AddHeader("Accept-Encoding", "gzip, deflate");
+            request.AddHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+
+            if (referer != null)
+                request.AddHeader("Referer", referer);
+        }
+        public static async Task<RestResponse> ExecutePostRequestAsync(string url, CookieContainer cookies,
+       IEnumerable<(string name, string value)> headers, string referer,
+       string body,
+       CancellationToken cancellationToken = default)
+        {
+            RestClient RestClient = new RestClient(
+            new RestClientOptions
+            {
+                FollowRedirects = true,
+                AutomaticDecompression = DecompressionMethods.GZip,
+            }); ;
+
+            var request = new RestRequest(url, Method.Post)
+            {
+                CookieContainer = cookies,
+            };
+
+            AddHeadersToRequest(request, referer);
+
+            if (headers != null)
+                foreach (var (name, value) in headers)
+                    request.AddHeader(name, value);
+
+            request.AddBody(body, RestSharp.ContentType.FormUrlEncoded);
+
+            var response = await RestClient.ExecuteAsync(request, cancellationToken);
+
+            return response;
+        }
     }
+   
+    public static class UriExtensions
+    {
+        public static string QueryParameters(this Uri uri, string paramName)
+        {
+            var queryDictionary = System.Web.HttpUtility.ParseQueryString(uri.Query);
+            return queryDictionary[paramName];
+        }
+    }
+    public static class TimeHelpers
+    {
+        public static long ToTimeStamp(this DateTime dateTime) =>
+            (long)dateTime.Subtract(new DateTime(1970, 1, 1)).TotalSeconds;
+
+        public static DateTime FromTimeStamp(long timestamp) =>
+            new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc).AddSeconds(timestamp);
+    }
+
 }
